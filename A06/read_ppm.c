@@ -25,9 +25,9 @@ struct ppm_pixel** read_ppm_2d(const char* filename, int* w, int* h) {
     fgets(line, sizeof(line), fp);
     // // skip comments
     // fgets(line, sizeof(line), fp);
-    while (line[0] == '#') {
-      fgets(line, sizeof(line), fp);
-    }
+    // while (line[0] == '#') {
+    //   fgets(line, sizeof(line), fp);
+    // }
     // get width and height
     sscanf(line, "%d %d", w, h);
     // skip max value
