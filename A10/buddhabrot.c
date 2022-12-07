@@ -7,9 +7,7 @@
 #include "read_ppm.h"
 #include "write_ppm.h"
 #include "math.h"
-
-pthread_mutex_t lock;
-pthread_barrier_t barrier;
+#include <stdbool.h> 
 
 struct thread_data {
   int id;
@@ -19,12 +17,16 @@ struct thread_data {
   int end_j;
   struct ppm_pixel** pixels;
   int** member_count;
+  bool** member; 
   int size;
   float xmin;
   float xmax;
   float ymin;
   float ymax;
   int maxIterations;
+  int* max_count;
+  pthread_mutex_t* lock;
+  pthread_barrier_t* barrier;
 };
 
 void *calculate_mandelbrot(void *threadarg) {
@@ -34,9 +36,6 @@ void *calculate_mandelbrot(void *threadarg) {
   // Step 1: Determine mandelbrot set membership
   for (int i = data->start_i; i < data->end_i; i++) {
     for (int j = data->start_j; j < data->end_j; j++) {
-      // if (i > 3 || j > 3) {
-      //   break;
-      // }
       float xfarc = (float) j / (float) data->size;
       float yfarc = (float) i / (float) data->size;
       float x0 = data->xmin + (data->xmax - data->xmin) * xfarc;
@@ -44,68 +43,57 @@ void *calculate_mandelbrot(void *threadarg) {
       float x = 0.0;
       float y = 0.0;
       int iteration = 0;
-      // printf("i: %d, j: %d, x0: %f, y0: %f\n", i, j, x0, y0);
       while (x * x + y * y < 2 * 2 && iteration < data->maxIterations) {
         float xtemp = x * x - y * y + x0;
         y = 2 * x * y + y0;
         x = xtemp;
         iteration++;
       }
-      // printf("x: %f, y: %f, iteration: %d\n", x, y, iteration);
       if (iteration < data->maxIterations) {
         // set membership at (row,col) to false
-        data->member_count[i][j] = 0;
+        data->member[i][j] = false;
       } else {
         // set membership at (row,col) to true
-        data->member_count[i][j] = 1;
+        data->member[i][j] = true;
       }
     }
   }
 
   // Step 2: Compute visited counts
-  printf("Step 2: Compute visited counts\n");
-  int max_count = 0;
   for (int i = data->start_i; i < data->end_i; i++) {
     for (int j = data->start_j; j < data->end_j; j++) {
-      if (data->member_count[i][j] == 0) {
+      if (data->member[i][j] == true) {
         continue;
       } 
       float xfrac = (float) j / (float) data->size;
       float yfrac = (float) i / (float) data->size;
-      // printf("xfrac: %f, yfrac: %f\n", xfrac, yfrac);
       float x0 = data->xmin + (data->xmax - data->xmin) * xfrac;
       float y0 = data->ymin + (data->ymax - data->ymin) * yfrac;
-      // printf("x0: %f, y0: %f\n", x0, y0);
       float x = 0.0;
       float y = 0.0;
       int iteration = 0;
-      while (x * x + y * y < 2 * 2 && iteration < data->maxIterations) {
-        iteration++;
-        // printf("x * x + y * y: %f\n", x * x + y * y);
+      while (x * x + y * y < 2 * 2) {
         float xtemp = x * x - y * y + x0;
         y = 2 * x * y + y0;
         x = xtemp;
-        int yrow = (int) ((y - data->ymin) * data->size / (data->ymax - data->ymin));
-        int xcol = (int) ((x - data->xmin) * data->size / (data->xmax - data->xmin));
+        int yrow = round((y - data->ymin) * data->size / (data->ymax - data->ymin));
+        int xcol = round((x - data->xmin) * data->size / (data->xmax - data->xmin));
         if (yrow >= 0 && yrow < data->size && xcol >= 0 && xcol < data->size) {
-          pthread_mutex_lock(&lock); 
+          pthread_mutex_lock(data->lock); 
           data->member_count[yrow][xcol]++;
-          pthread_mutex_unlock(&lock);
-          if (data->member_count[yrow][xcol] > max_count) {
-            pthread_mutex_lock(&lock);
-            max_count = data->member_count[yrow][xcol];
-            pthread_mutex_unlock(&lock);
+          pthread_mutex_unlock(data->lock);
+          if (data->member_count[yrow][xcol] > *data->max_count) {
+            pthread_mutex_lock(data->lock);
+            *data->max_count = data->member_count[yrow][xcol];
+            pthread_mutex_unlock(data->lock);
           }
         }
       }
     }
   }
 
-  pthread_barrier_wait (&barrier);
-  printf("max_count: %d", max_count);
+  pthread_barrier_wait(data->barrier);
   // Step 3: Compute colors
-  // int max_count = 0;
-  printf("Step 3: Compute colors\n");
   float gamma = 0.681;
   float factor = 1.0 / gamma;
   for (int i = data->start_i; i < data->end_i; i++) {
@@ -113,18 +101,9 @@ void *calculate_mandelbrot(void *threadarg) {
       float value = 0;
       int count = data->member_count[i][j];
       if (count > 0) {
-        value = log(count) / log(max_count);
+        value = log(count) / log(*data->max_count);
         value = pow(value, factor);
       }
-      // if (count == 0) {
-      //   data->pixels[i][j].red = 255;
-      //   data->pixels[i][j].green = 255;
-      //   data->pixels[i][j].blue = 255;
-      // } else {
-      //   data->pixels[i][j].red = 0;
-      //   data->pixels[i][j].green = 0;
-      //   data->pixels[i][j].blue = 0;
-      // }
       data->pixels[i][j].red = (int) (255 * value);
       data->pixels[i][j].green = (int) (255 * value);
       data->pixels[i][j].blue = (int) (255 * value);
@@ -165,10 +144,20 @@ int main(int argc, char* argv[]) {
   // todo: your code here
   // compute image
 
+  // create an array of boolean for member check 
+  bool** member = malloc(size * sizeof(bool*));
+  for (int i = 0; i < size; i++) {
+    member[i] = malloc(size * sizeof(bool));
+  }
+
   // create an array of integers to count the number of times each pixel is in the set
   int** member_count = malloc(size * sizeof(int*));
   for (int i = 0; i < size; i++) {
     member_count[i] = malloc(size * sizeof(int));
+    // initialize to 0
+    for (int j = 0; j < size; j++) {
+      member_count[i][j] = 0;
+    }
   }
 
   // create the pixels
@@ -179,17 +168,22 @@ int main(int argc, char* argv[]) {
   }
 
   // mutex lock
+  pthread_mutex_t lock;
   if (pthread_mutex_init(&lock, NULL) != 0) {
     printf("\n mutex init has failed\n");
     return 1;
   } 
   
   // barrier
+  pthread_barrier_t barrier;
   pthread_barrier_init(&barrier, NULL, 4);
 
   // declare threads
   pthread_t threads[4];
   struct thread_data thread_data_array[4];
+
+  // max count
+  int max_count = 0;
 
   // create threads
   clock_t t;
@@ -213,12 +207,16 @@ int main(int argc, char* argv[]) {
     }
     thread_data_array[i].pixels = pixels;
     thread_data_array[i].member_count = member_count;
+    thread_data_array[i].member = member;
     thread_data_array[i].size = size;
     thread_data_array[i].xmin = xmin;
     thread_data_array[i].xmax = xmax;
     thread_data_array[i].ymin = ymin;
     thread_data_array[i].ymax = ymax;
     thread_data_array[i].maxIterations = maxIterations;
+    thread_data_array[i].max_count = &max_count;
+    thread_data_array[i].lock = &lock;
+    thread_data_array[i].barrier = &barrier;
     pthread_create(&threads[i], NULL, calculate_mandelbrot, (void*) &thread_data_array[i]);
   }
 
@@ -255,6 +253,12 @@ int main(int argc, char* argv[]) {
     free(member_count[i]);
   }
   free(member_count);
+
+  // free the member
+  for (int i = 0; i < size; i++) {
+    free(member[i]);
+  }
+  free(member);
 
   return 0;
 }
